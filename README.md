@@ -120,15 +120,17 @@ src/engine/
   index.js              public API
 src/vendor/jszip.min.js vendored locally (no external CDN script)
 test/
-  corpus.json           25-case verification corpus (20 governance + 5 accuracy)
+  corpus.json           35-case corpus (20 governance + 5 accuracy + 10 adversarial)
   run.mjs               replays the corpus through the engine
+  pressure.mjs          triangulates agent-generated cases: engine vs 2 blind judges
 ```
 
 ## Test
 
 ```bash
-node test/run.mjs        # 25/25 — Lane decision + 5 accuracy fixtures
+node test/run.mjs        # 35/35 on the Lane 1 vs Lane 2 decision
 node test/run.mjs -v     # verbose, per-case
+node test/pressure.mjs test/pressure-cases.json   # adversarial triangulation
 ```
 
 Lane (Lane 1 vs Lane 2) is the primary metric. The finer *Approve-state* suffix and

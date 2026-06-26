@@ -20,7 +20,7 @@ export const SIGNALS = [
     mapsTo: "5.5",
     effect: "fails-lane1-condition",
     confidence: "strong",
-    patterns: ["@anthropic-ai/sdk", "import\\s+.*Anthropic", "new\\s+Anthropic\\s*\\(", "['\"]openai['\"]", "new\\s+OpenAI\\s*\\(", "@azure/openai", "AzureOpenAI", "@google/generative-ai", "GoogleGenerativeAI\\s*\\(", "@google-cloud/aiplatform", "cohere-ai", "CohereClient\\s*\\(", "@mistralai/mistralai", "@huggingface/inference", "@xenova/transformers", "['\"]replicate['\"]", "['\"]ollama['\"]", "langchain", "@langchain/", "llama-?index", "@aws-sdk/client-bedrock", "require\\(['\"](openai|@anthropic-ai/sdk|@google/generative-ai|cohere-ai|@mistralai/mistralai)['\"]\\)"],
+    patterns: ["@anthropic-ai/sdk", "import\\s+.*Anthropic", "new\\s+Anthropic\\s*\\(", "['\"]openai['\"]", "new\\s+OpenAI\\s*\\(", "@azure/openai", "AzureOpenAI", "@google/generative-ai", "GoogleGenerativeAI\\s*\\(", "@google-cloud/aiplatform", "cohere-ai", "CohereClient\\s*\\(", "@mistralai/mistralai", "@huggingface/inference", "@xenova/transformers", "['\"]replicate['\"]", "['\"]ollama['\"]", "langchain", "@langchain/", "llama-?index", "@aws-sdk/client-bedrock", "require\\(['\"](openai|@anthropic-ai/sdk|@google/generative-ai|cohere-ai|@mistralai/mistralai)['\"]\\)", "from\\s+openai\\s+import", "import\\s+openai\\b", "from\\s+anthropic\\s+import", "import\\s+anthropic\\b", "from\\s+cohere\\s+import", "import\\s+google\\.generativeai", "\\bOpenAI\\s*\\(", "\\bAsyncOpenAI\\s*\\("],
   },
   {
     id: "client-side-model-api-key",

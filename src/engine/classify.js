@@ -17,25 +17,37 @@ import { scanCorpus, stripComments, fileRole } from './scan.js';
 // a weak keyword can't over-escalate a benign utility.
 // Strong entity terms fire on their own; weak terms ("restricted" as a CSS
 // class, "portfolio" on a marketing page) need a real data context.
-const STRONG_ENTITY = /\b(investors?|LPs?|GPs?|capital\s*accounts?|capital\s*calls?|NAV|AUM|subscriptions?|redemptions?|custodian|ledger|mandates?|fund\s*(nav|id|name|position|holdings?)|client[_\s-]?(name|id|account|holding|portfolio)|SSN|EIN|TIN|account\s*number|routing\s*number|PII|PHI|MNPI|material\s*non[-\s]public)\b/i;
-const WEAK_SCOPE = /\b(restricted|confidential|portfolios?|holdings?)\b/i;
-const SCOPE_BENIGN = /[.#][\w-]*(restricted|confidential)|class\s*=\s*['"][^'"]*(restricted|confidential)|(restricted|confidential)[\w-]*\s*[:{]/i;
+const STRONG_ENTITY = /\b(investors?|LPs?|GPs?|capital\s*accounts?|capital\s*calls?|subscriptions?|redemptions?|custodian|ledger|mandates?|fund\s*(nav|id|name|position|holdings?)|client[_\s-]?(name|id|account|holding|portfolio)|SSN|EIN|TIN|account\s*number|routing\s*number|PII|PHI|MNPI|material\s*non[-\s]public)\b/i;
+// NAV/AUM are case-sensitive (real ones are uppercase) and must not be a tag or
+// word fragment — so the HTML <nav> element and "navbar" don't read as data.
+const STRONG_ACRONYM = /(?<![<\/\w])(NAV|AUM)(?![\w])/;
+// "restricted"/"confidential" are data-classification words; portfolio/holdings
+// are too generic to escalate alone (a real holdings tool trips STRONG_ENTITY via
+// fund/investor/NAV anyway), so they're deliberately NOT weak scope terms.
+const WEAK_INTENT = /\b(restricted|confidential)\b/i;
+const SCOPE_BENIGN = /[.#][\w-]*(restricted|confidential)|class\s*=\s*['"][^'"]*(restricted|confidential)|(restricted|confidential)[\w-]*\s*[:{]|data-[\w-]*=\s*['"][^'"]*(restricted|confidential)/i;
 // A POST to an external API is only a *write* when its path looks like one —
 // POST is also how AI / GraphQL / search APIs are queried, so method alone
 // can't decide. PUT/PATCH/DELETE are unambiguous writes (handled by METHOD_WRITE).
-const MUTATING_FETCH_EXTERNAL =/(fetch|axios)\s*\(\s*['"`]https?:\/\/(?!([a-z0-9.-]*\.)?gpfundsolutions\.com)[^'"`]*\/(records?|create|update|save|insert|write|entries|ledger|payments?|sign[-_]?off|submit|upload|transactions?|invoices?)\b[^'"`]*['"`]\s*,[^;]{0,300}?\bmethod\b\s*:\s*['"`]post/i;
-const XHR_MUTATE_EXTERNAL = /\.open\s*\(\s*['"`](put|patch|delete)['"`]\s*,\s*['"`]https?:\/\/(?!([a-z0-9.-]*\.)?gpfundsolutions\.com)/i;
+const WRITE_PATH = '(records?|create|update|save|insert|write|entries|ledger|payments?|sign[-_]?off|submit|upload|transactions?|invoices?|allocations?)';
+const MUTATING_FETCH_EXTERNAL = new RegExp(`(fetch|axios)\\s*\\(\\s*['"\`]https?:\\/\\/(?!([a-z0-9.-]*\\.)?gpfundsolutions\\.com)[^'"\`]*\\/${WRITE_PATH}\\b[^'"\`]*['"\`]\\s*,[^;]{0,300}?\\bmethod\\b\\s*:\\s*['"\`]post`, 'i');
+// Same-origin relative POST to a write-y path (NOT the /api/chat proxy) is a write.
+const RELATIVE_POST_WRITE = new RegExp(`(fetch|axios)\\s*\\(\\s*['"\`]\\/(?!api\\/chat\\b)[^'"\`]*\\/${WRITE_PATH}\\b[^'"\`]*['"\`]\\s*,[^;]{0,300}?\\bmethod\\b\\s*:\\s*['"\`]post`, 'i');
+const XHR_MUTATE_EXTERNAL = /\.open\s*\(\s*['"`](put|patch|delete)['"`]\s*,\s*['"`]https?:\/\//i;
 const SHARED_PATH_WRITE = /(\.save|writefile\w*|to_csv|write_csv|wb\.save|savefig|\.to_excel)\s*\(\s*['"`](\\\\|\/\/)[a-z0-9._-]+[\\/]/i;
+// ORM-chain writes (Drizzle/Kysely .update(t).set(…)) and Go (gorm / http.NewRequest).
+const ORM_CHAIN_WRITE = /\.(update|insert|delete)\s*\(\s*\w+\s*\)\s*\.(set|values|where)\s*\(|\.(insert|update|delete)into\s*\(/i;
+const GO_WRITE = /\b(db|tx)\.(Create|Save|Updates?|Delete|FirstOrCreate)\s*\(|\bdb\.Model\([^)]*\)\.(Update|Save|Delete)|gorm\.io|http\.NewRequest\s*\(\s*['"`](put|patch|delete)['"`]/i;
 
-// Restricted-data detection: a strong entity anywhere, or a weak term in a
-// non-CSS / non-markup line. Operates on comment-stripped text.
+// Restricted-data detection: a strong entity anywhere, or "restricted"/
+// "confidential" in a non-CSS / non-markup line. Operates on comment-stripped text.
 function detectRestricted(cleanFiles) {
-  if (cleanFiles.some((f) => STRONG_ENTITY.test(f.clean))) return true;
+  if (cleanFiles.some((f) => STRONG_ENTITY.test(f.clean) || STRONG_ACRONYM.test(f.clean))) return true;
   for (const f of cleanFiles) {
     const e = (f.path.split('.').pop() || '').toLowerCase();
     if (['css', 'scss', 'sass', 'less'].includes(e)) continue; // stylesheet "restricted" is never data
     for (const ln of f.clean.split('\n')) {
-      if (WEAK_SCOPE.test(ln) && !SCOPE_BENIGN.test(ln)) return true;
+      if (WEAK_INTENT.test(ln) && !SCOPE_BENIGN.test(ln)) return true;
     }
   }
   return false;
@@ -49,7 +61,14 @@ function isMinified(text) {
   return maxLine > 1500 || (text.length > 2000 && text.length / lines.length > 400);
 }
 const VENDOR_HOST = /(api\.(anthropic|openai|cohere|mistral|groq)\.|[a-z0-9-]+\.openai\.azure\.com|openai\.azure\.com|generativelanguage\.googleapis\.com|api-inference\.huggingface\.co|api\.replicate\.com|bedrock(-runtime)?\.[a-z0-9-]+\.amazonaws\.com)/i;
-const STRONG_RELIANCE_EXPORT = /(jspdf|pdfkit|exceljs|xlsx\.write|pptxgenjs|\bdocx\b|exportto(excel|pdf|csv)|generate\w*(report|statement|deliverable|pack|filing|invoice))/i;
+// The chat-completions payload shape is a reliable AI-call fingerprint even when
+// the host/SDK are obfuscated (string-assembled, dynamic import, env var).
+const AI_PAYLOAD = /messages\s*:\s*\[\s*\{[^]*?\brole\b\s*:\s*['"](system|user|assistant)['"][^]*?\bcontent\b/i;
+const AI_MODEL = /\bmodel\s*:\s*['"](gpt-|claude-|gemini|mistral|llama|text-embedding|text-davinci|chat-bison|o[134]-)/i;
+// A real client deliverable means an actual document-generation LIBRARY produced
+// an artifact — not just a function NAMED generateReport / exportToPdf (reliance
+// is un-inferable; a name must not auto-escalate to Approve).
+const STRONG_RELIANCE_EXPORT = /(jspdf|pdfkit|exceljs|xlsx\.(write|writeFile)|pptxgenjs|\bdocx\b|html2pdf|html2canvas|puppeteer|officegen|carbone)/i;
 // Sharing/reliance is mostly un-inferable from code; only fire on unambiguous
 // markers. (Deliberately NOT `role:` — that collides with chat message roles.)
 const STRONG_RELIANCE_SHARE = /(node-cron|cron\.schedule|@nestjs\/schedule|crontab|"bin"\s*:|#!\/usr\/bin\/env\s+node|\bargparse\b|click\.command|\bisAdmin\b|hasRole\s*\(|\b(colleagues|team\s*drive|other\s+users|multi[-\s]user|shared\s+with|for\s+the\s+team|the\s+(ap|ops|finance|accounting|sales)\s+team|everyone\s+(uses|on))\b)/i;
@@ -169,25 +188,43 @@ export function analyze(corpus, assumptions = {}) {
     return out;
   };
 
+  // A file named *.spec.js / *.test.js is treated as a test (its AI calls don't
+  // count) — UNLESS runtime code actually imports it, in which case it ships.
+  const importedNames = new Set();
+  for (const f of cleanFiles) {
+    if (fileRole(f.path) === 'test') continue;
+    for (const m of f.clean.matchAll(/(?:from|require\(|import\()\s*['"]([^'"]+)['"]/g)) {
+      importedNames.add(m[1].split('/').pop().replace(/\.(m?[jt]sx?)$/, ''));
+    }
+  }
+  const isImportedTest = (p) => importedNames.has(p.split('/').pop().replace(/\.(m?[jt]sx?)$/, ''));
+  const firesAt = (id, pred) => !!(entry(id) && entry(id).evidence.some(pred));
+
   // ---- Code-certain technical facts ---------------------------------------
   const directHost = anyEvidenceMatches(entry('runtime-ai-direct-vendor-host'), VENDOR_HOST);
   // An AI SDK counts as a runtime call only when actually imported in source —
-  // a bare listing in package.json (even outside devDependencies) doesn't.
+  // a bare listing in package.json (even outside devDependencies) doesn't —
+  // but a "spec/test" module that runtime code imports does ship.
   const sdkEntry = entry('runtime-ai-vendor-sdk-import');
-  const sdkImport = !!(sdkEntry && sdkEntry.runtimeEvidence.some((e) => e.role !== 'manifest'));
-  const clientKey = fired('client-side-model-api-key');
-  const directAI = directHost || sdkImport || clientKey;
-  const proxyAI = entry('approved-enterprise-proxy') && entry('approved-enterprise-proxy').fired && !directAI;
+  const sdkImport = !!(sdkEntry && sdkEntry.evidence.some((e) => (e.runtime && e.role !== 'manifest') || (e.role === 'test' && isImportedTest(e.path))));
+  const clientKey = fired('client-side-model-api-key') || firesAt('client-side-model-api-key', (e) => e.role === 'test' && isImportedTest(e.path));
+  // An LLM payload (model + chat messages) that is NOT going to the approved
+  // same-origin proxy is a direct AI call, however the host/SDK were hidden.
+  const proxyPresent = !!(entry('approved-enterprise-proxy') && entry('approved-enterprise-proxy').fired);
+  const aiPayload = (grep(AI_PAYLOAD) || grep(AI_MODEL)) && !proxyPresent;
+  const directAI = directHost || sdkImport || clientKey || aiPayload;
+  const proxyAI = proxyPresent && !directAI;
   const localML = fired('logic-probabilistic-ml-inference');
   const backendEv = entry('backend-server-present')?.evidence || [];
   const backend = backendEv.some((e) => BACKEND_STRONG.test(e.text)) || backendEv.some((e) => BACKEND_PATH.test(e.path));
-  // A write to a system of record: DB/ORM/SQL or BaaS evidence, a mutating call
-  // to an external host (PUT/PATCH/DELETE or POST to an external API), or a save
-  // to a network share — NOT a POST to the same-origin /api/chat proxy.
+  // A write to a system of record: DB/ORM/SQL or BaaS, a mutating call to an
+  // external host, a same-origin POST to a write-y path, an ORM-chain write, a Go
+  // (gorm/http) write, or a save to a network share — NOT a POST to /api/chat.
   const dbOrmWrite = (entry('db-source-of-truth-write')?.evidence || []).some((e) => DB_ORM_WRITE.test(e.text));
   const dbWrite = dbOrmWrite || fired('backend-as-a-service-write')
-    || grep(MUTATING_EXTERNAL) || grep(METHOD_WRITE)
-    || grep(MUTATING_FETCH_EXTERNAL) || grep(XHR_MUTATE_EXTERNAL) || grep(SHARED_PATH_WRITE);
+    || grep(MUTATING_EXTERNAL) || grep(METHOD_WRITE) || grep(MUTATING_FETCH_EXTERNAL)
+    || grep(RELATIVE_POST_WRITE) || grep(XHR_MUTATE_EXTERNAL) || grep(SHARED_PATH_WRITE)
+    || grep(ORM_CHAIN_WRITE) || grep(GO_WRITE);
   const cdnScript = fired('third-party-cdn-script') || fired('third-party-analytics-telemetry');
   const outbound = fired('outbound-network-call-nonallowlisted');
   const persistence = fired('client-persistence-sensitive');
@@ -196,7 +233,9 @@ export function analyze(corpus, assumptions = {}) {
   // ---- Logic posture (STAR §3.2) ------------------------------------------
   const extraction = fired('logic-probabilistic-extraction-parsing') || grep(EXTRACTION_EXTRA);
   const qa = fired('logic-probabilistic-qa-retrieval');
-  const drafting = fired('logic-probabilistic-summarize-draft');
+  // "Drafting" is only probabilistic (Yellow) when an actual model produces it —
+  // a deterministic function merely NAMED generateReport is Green.
+  const drafting = fired('logic-probabilistic-summarize-draft') && (directAI || proxyAI || localML);
   const deterministic = fired('logic-deterministic-green');
   const probabilistic = directAI || proxyAI || localML || extraction || qa || drafting;
   // Is probabilistic output exported/written in a batch (no human sees each

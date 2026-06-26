@@ -1,0 +1,360 @@
+{
+  "cases": [
+    {
+      "id": "PT-EVADE-01",
+      "title": "Drizzle ORM update + relative PUT writing back to the investor capital-account ledger",
+      "attack": "Write to a system of record hidden behind an un-listed ORM (Drizzle) and a relative PUT whose verb/method key is disguised.",
+      "description": "A POC that recomputes an LP's drawn commitment after a capital call and persists the new figure back to the fund's capital-account ledger. The persistence is a Drizzle ORM mutation (db.update(capitalAccounts).set(...).where(...)) plus a sync to the fund-admin system via a relative-path request whose verb is assembled as ['P','U','T'].join('') and passed under a 'httpMethod' key. The engine's write detectors all miss it, so it looks like a read-only formatter and lands Lane 1; the correct answer is Approve-state because it updates a system of record holding client/fund data.",
+      "files": [
+        {
+          "path": "src/ledger/capitalAccounts.js",
+          "snippet": "import { drizzle } from 'drizzle-orm/postgres-js';\nimport { capitalAccounts } from './schema.js';\nimport { eq } from 'drizzle-orm';\n\nconst db = drizzle(client);\n\n// Recompute the LP's drawn commitment after a capital call, then persist the\n// new balance back to the investor capital-account ledger (source of record).\nexport async function postCapitalCall(investorId, callAmount) {\n  const rows = await db\n    .update(capitalAccounts)\n    .set({ commitmentDrawn: callAmount, balanceUpdatedAt: new Date() })\n    .where(eq(capitalAccounts.investorId, investorId))\n    .returning();\n  return rows[0];\n}\n\n// Mirror the adjusted figure to the downstream fund-admin system of record.\nconst verb = ['P', 'U', 'T'].join('');\nexport async function syncToFundAdmin(investorId, payload) {\n  const path = '/api/v2/ledger/capital-accounts/' + investorId;\n  return apiClient.request(path, { httpMethod: verb, json: payload });\n}"
+        }
+      ],
+      "expectedLane": "Lane 2 (Approve-state)",
+      "expectedTier": "Approve",
+      "expectedFailingConditions": [
+        "5.3",
+        "5.2"
+      ],
+      "expectedConfidence": "high",
+      "expectedDataScope": "restricted",
+      "rationale": "The code writes to a system of record (5.3) \u2014 an investor capital-account ledger holding client/fund data \u2014 which forces Approve-state per the tier-wins rule (and contradicts 5.2 General-data-only since the write is authoritative). Drizzle's chained .update(table).set(...) is not literal 'UPDATE <word> SET' SQL, and neither 'drizzle-orm' nor 'postgres-js' is in DB_ORM_WRITE's driver list, so the ORM write is invisible. The sync is a relative path (no https://, so MUTATING_EXTERNAL/MUTATING_FETCH_EXTERNAL miss) with the verb computed and stored under 'httpMethod' rather than the literal 'method:' key METHOD_WRITE looks for. With zero write evidence the engine sets writeAuthority='none' and reports a read-only Lane 1 formatter; the true governance answer is Approve-state -> Lane 2 with AI Committee sign-off."
+    },
+    {
+      "id": "PT-EVADE-02",
+      "title": "Direct OpenAI call via fragment-assembled host and dynamic import(), summarizing investor statements",
+      "attack": "Hide a direct vendor AI call by string-concatenating the host and loading the SDK through a variable dynamic import so no literal hostname or package token appears.",
+      "description": "An IR helper that drafts a plain-English summary of an LP's capital-account statement by calling OpenAI's chat-completions endpoint directly. The vendor host is assembled as 'op'+'enai' then 'https://api.'+SVC+'.com/...', and the SDK is pulled in with await import(SVC) where SVC is a runtime variable \u2014 so no literal 'api.openai.com', no quoted 'openai', and no baseURL: key ever appears in source. The engine sees no runtime AI call and clears 5.5, reporting Lane 1; the correct answer is Lane 2 because a direct external AI model call (not the approved proxy) disqualifies Lane 1.",
+      "files": [
+        {
+          "path": "src/ir/summarize.js",
+          "snippet": "// IR helper: draft a plain-English summary of an LP's capital-account\n// statement that the analyst can paste into a client email.\nconst SVC = 'op' + 'enai';                       // model vendor, assembled at runtime\nconst ENDPOINT = 'https://api.' + SVC + '.com/v1/chat/completions';\nconst token = window.__cfg.modelToken;\n\nexport async function summarizeStatement(statementText) {\n  const lib = await import(/* @vite-ignore */ SVC);   // dynamic, variable specifier\n  const client = new lib.default({ apiKey: token });\n  const r = await send(ENDPOINT, {\n    model: 'gpt-4o-mini',\n    messages: [{ role: 'user', content: 'Summarize this investor capital account statement: ' + statementText }],\n  });\n  return r.choices[0].message.content;\n}\n\nfunction send(url, body) {\n  return fetch(url, {\n    method: 'POST',\n    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },\n    body: JSON.stringify(body),\n  }).then((x) => x.json());\n}"
+        }
+      ],
+      "expectedLane": "Lane 2",
+      "expectedTier": "Use",
+      "expectedFailingConditions": [
+        "5.5"
+      ],
+      "expectedConfidence": "high",
+      "expectedDataScope": "restricted",
+      "rationale": "This is a direct runtime call to a public LLM vendor (OpenAI) outside the approved same-origin /api/chat proxy, which fails 5.5 and forces Lane 2 regardless of tier. Every detector misses: the host never appears as the literal 'api.openai.com' (it is 'op'+'enai' then concatenated), so VENDOR_HOST and all direct-host patterns are clean; the SDK arrives via await import(SVC) on a variable specifier, evading all literal-package SDK patterns and the quoted 'openai' token; the endpoint is assigned to ENDPOINT rather than a baseURL: key, dodging the baseURL pattern; and the fetch target is a variable, so the approved-proxy patterns don't fire either. The engine therefore computes directAI=false and passes 5.5, wrongly clearing it for Lane 1. (It is also probabilistic drafting over investor data, reinforcing Lane 2; note the tier stays Use because no write/deliverable/unreviewed-probabilistic-over-restricted trigger is asserted, but 5.5 alone is dispositive for Lane 2.)"
+    },
+    {
+      "id": "PT-FP-RELY-01",
+      "title": "Deterministic allocation-percentage display tool, personal use (escalated to Approve)",
+      "attack": "A benign identifier 'generateAllocationReport' double-trips the deliverable-reliance detector AND the probabilistic-draft signal, forcing Approve-state.",
+      "description": "A single static page that takes pasted general allocation weights and renders an on-screen HTML table of percentages. Pure arithmetic plus toFixed formatting; no network, no storage, no AI, no write. The only 'export' is window.print(). The builder uses it personally for scratch notes. Despite being textbook Green/Use/Lane-1, the function name generateAllocationReport matches STRONG_RELIANCE_EXPORT (generate\\w*(report...)) so auto-reliance becomes 'deliverable' and the tier jumps to Approve; the same substring matches the probabilistic-summarize-draft pattern (generate\\w*Report), flipping posture to Yellow. The engine returns Lane 2 (Approve-state), driven by \u00a75.1 risk tier.",
+      "files": [
+        {
+          "path": "index.html",
+          "snippet": "<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>Allocation Report</title>\n<style>body{font-family:system-ui;margin:2rem}table{border-collapse:collapse}td{padding:.25rem .75rem;border-bottom:1px solid #ddd}</style>\n</head>\n<body>\n  <h1>Target vs Actual Allocation</h1>\n  <p>Paste sample weights, see the split. Nothing leaves the page.</p>\n  <table id=\"grid\"></table>\n  <button id=\"report\">Generate Report</button>\n  <button id=\"print\">Print</button>\n  <script src=\"./report.js\"></script>\n</body>\n</html>"
+        },
+        {
+          "path": "report.js",
+          "snippet": "// Deterministic, display-only. General/sample numbers in, on-screen table out.\n// No network, no storage, no AI, no write of any kind.\nfunction generateAllocationReport(rows) {\n  const total = rows.reduce((s, r) => s + r.weight, 0) || 1;\n  return rows.map(r => ({ name: r.name, pct: (r.weight / total * 100).toFixed(1) + '%' }));\n}\nfunction exportToPdf() {\n  // 'Export' is just the browser's own print dialog over the same HTML table.\n  window.print();\n}\nconst SAMPLE_ROWS = [\n  { name: 'Equities', weight: 60 },\n  { name: 'Fixed Income', weight: 30 },\n  { name: 'Cash', weight: 10 },\n];\ndocument.getElementById('report').onclick = () => {\n  const out = generateAllocationReport(SAMPLE_ROWS);\n  document.getElementById('grid').innerHTML =\n    out.map(r => '<tr><td>' + r.name + '</td><td>' + r.pct + '</td></tr>').join('');\n};\ndocument.getElementById('print').onclick = exportToPdf;"
+        },
+        {
+          "path": "README.md",
+          "snippet": "# Allocation Report\nPersonal scratch tool. Paste any sample allocation weights and eyeball the\npercentage split on screen. Runs entirely in the browser \u2014 no data leaves the\npage, nothing is saved, no server. General/demo data only. Built by me, for me."
+        }
+      ],
+      "expectedLane": "Lane 1",
+      "expectedTier": "Use",
+      "expectedFailingConditions": [],
+      "expectedDataScope": "general",
+      "expectedConfidence": "high",
+      "rationale": "Per policy this is the textbook clean Lane 1 case: logic is GREEN (deterministic arithmetic + Intl-style formatting, no parsing/judgment), it only reads and surfaces general sample data, there is no write to any system of record, no runtime AI call, no third-party scripts or outbound calls, and no persistence. The output is shown on screen for the builder, who uses it personally \u2014 no one relies on it as a client deliverable, so the tier is USE, not Approve. The engine over-escalates purely on the lexical coincidence that 'generateAllocationReport' contains 'Report': STRONG_RELIANCE_EXPORT infers reliance='deliverable' (Approve) and the probabilistic-summarize-draft pattern marks posture Yellow, even though the function returns a plain percentage array and the only 'export' is window.print(). Reliance is explicitly an un-inferable, human-confirmed dimension; defaulting a name match to 'deliverable' is exactly the over-escalation the policy warns against."
+    },
+    {
+      "id": "PT-FP-SCOPE-02",
+      "title": "Tab UI that remembers theme/last-tab in localStorage (escalated to Lane 2 on \u00a75.7)",
+      "attack": "Weak scope terms 'portfolio'/'holdings' appear only as a JS enum value, button label, and data-name attribute \u2014 none caught by SCOPE_BENIGN \u2014 so data scope is falsely set to restricted, and benign UI-state persistence then fails \u00a75.7.",
+      "description": "A static client-side tab switcher over a pasted general JSON array. It saves the last-selected tab and the light/dark theme to localStorage so the view is restored on reload \u2014 plainly non-sensitive UI preference state. There is no network, no AI, no write to any record, and no actual client/fund data. But the words 'portfolio' and 'holdings' occur as a tab enum (PORTFOLIO:'portfolio'), as button text, and in data-name attributes. detectRestricted's WEAK_SCOPE matches them; SCOPE_BENIGN only neutralizes CSS-selector / class= / 'name:'{ forms, so these non-CSS occurrences slip through and force dataScope='restricted'. Combined with the localStorage calls, \u00a75.7 (no local persistence of restricted data) flips to fail and the engine returns Lane 2.",
+      "files": [
+        {
+          "path": "app.js",
+          "snippet": "// Pure client-side tab UI over a pasted general JSON array.\n// No network, no AI, no record writes. Remembers the open tab + theme only.\nconst TABS = { OVERVIEW: 'overview', PORTFOLIO: 'portfolio', HOLDINGS: 'holdings' }; // display tab ids\n\nfunction activate(name) {\n  document.querySelectorAll('.tab').forEach(t =>\n    t.classList.toggle('active', t.dataset.name === name));\n  document.getElementById('view').textContent = 'Showing: ' + name;\n  localStorage.setItem('ui.lastTab', name);                          // restore tab on reload\n  localStorage.setItem('ui.theme', document.body.dataset.theme || 'light');\n}\n\ndocument.querySelectorAll('.tab').forEach(t =>\n  t.addEventListener('click', () => activate(t.dataset.name)));\n\nconst saved = localStorage.getItem('ui.lastTab');\nif (saved && TABS[saved.toUpperCase()]) activate(saved);"
+        },
+        {
+          "path": "index.html",
+          "snippet": "<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>Tabs</title>\n<style>.tab{padding:.5rem 1rem}.tab.active{font-weight:700}</style>\n</head>\n<body data-theme=\"light\">\n  <nav>\n    <button class=\"tab\" data-name=\"overview\">Overview</button>\n    <button class=\"tab\" data-name=\"portfolio\">Portfolio</button>\n    <button class=\"tab\" data-name=\"holdings\">Holdings</button>\n  </nav>\n  <main id=\"view\"></main>\n  <script src=\"./app.js\"></script>\n</body>\n</html>"
+        }
+      ],
+      "expectedLane": "Lane 1",
+      "expectedTier": "Use",
+      "expectedFailingConditions": [],
+      "expectedDataScope": "general",
+      "rationale": "This is a clean Lane 1 utility: deterministic (GREEN) logic, general data only, no write to a system of record, no runtime AI, no third-party scripts/outbound calls. It persists only UI chrome \u2014 the last-open tab and the theme \u2014 which \u00a75.7 permits because that is general data, not Client/Fund/Restricted. The words 'portfolio' and 'holdings' here are interface labels and an enum, never actual data, so the real data scope is general and \u00a75.7 holds. The engine over-escalates because detectRestricted treats any WEAK_SCOPE term outside a stylesheet as restricted data unless SCOPE_BENIGN matches, and SCOPE_BENIGN only covers CSS-selector / class-attribute / 'identifier:'-or-'{' forms \u2014 it does not cover a quoted enum value, button text, or a data-name attribute. The mis-inferred 'restricted' scope then combines with the harmless localStorage calls to fail \u00a75.7, bouncing a Lane 1 tool to Lane 2. Data sensitivity is an un-inferable dimension the policy says to confirm with the user, not to assume from interface vocabulary."
+    },
+    {
+      "id": "PT-BOUND-01",
+      "title": "Local risk scorer over fund holdings with explicit per-item human review (stays Lane 1)",
+      "attack": "Restricted data + probabilistic logic that the engine must NOT escalate, because every output is human-reviewed before use (the \u00a75.4 carve-out).",
+      "description": "A single React component runs a local probabilistic risk scorer over fund holdings and renders one suggestion per row. Each row has an explicit Approve control the human must click before the value is used; nothing is batched, exported, or written. This sits exactly on the \u00a75.4 line: probabilistic output on Client/Fund data is acceptable for Lane 1 only when 100% of outputs are reviewed every time. The mirror image (swap the per-row Approve for an exportCsv(rows) of the same scores) flips to Approve, so this case verifies the engine reads the review condition correctly rather than escalating on restricted+probabilistic alone.",
+      "files": [
+        {
+          "path": "src/HoldingsRiskReview.jsx",
+          "snippet": "import { useState } from 'react';\nimport { predictRisk } from './scorer';\n\n// Suggests a risk tier for each fund holding. The number is a heuristic guess,\n// so an analyst must approve EVERY row before it counts. Nothing is exported\n// or saved \u2014 the approved values live only in this session's state.\nexport default function HoldingsRiskReview({ holdings }) {\n  const [approved, setApproved] = useState({});\n  return (\n    <table>\n      <tbody>\n        {holdings.map((h) => {\n          const guess = predictRisk(h); // probabilistic: { tier, confidence }\n          return (\n            <tr key={h.fundId}>\n              <td>{h.fundName}</td>\n              <td>NAV {h.nav}</td>\n              <td>suggested: {guess.tier} (conf {guess.confidence.toFixed(2)})</td>\n              <td>\n                <button onClick={() => setApproved((a) => ({ ...a, [h.fundId]: guess.tier }))}>\n                  Approve\n                </button>\n                <button onClick={() => setApproved((a) => ({ ...a, [h.fundId]: 'needs-review' }))}>\n                  Override\n                </button>\n              </td>\n            </tr>\n          );\n        })}\n      </tbody>\n    </table>\n  );\n}"
+        },
+        {
+          "path": "src/scorer.js",
+          "snippet": "// Tiny local heuristic \u2014 no network, no model SDK. Probabilistic by nature:\n// it can be wrong, which is exactly why each output is reviewed before use.\nexport function predictRisk(h) {\n  let p = 0.2;\n  if (h.concentration > 0.3) p += 0.3;\n  if (h.illiquidPct > 0.5) p += 0.25;\n  if (h.navTrend < 0) p += 0.15;\n  const tier = p > 0.6 ? 'elevated' : p > 0.35 ? 'watch' : 'normal';\n  return { tier, confidence: Math.min(0.99, p) }; // a guess, not a fact\n}"
+        }
+      ],
+      "expectedLane": "Lane 1",
+      "expectedTier": "Use",
+      "expectedDataScope": "restricted",
+      "expectedConfidence": "high",
+      "expectedFailingConditions": [],
+      "rationale": "STRONG_ENTITY fires (fund name/NAV, fundId) so dataScope auto-resolves to restricted, and predictRisk(...)/confidence make logic probabilistic (Yellow). But there is no SILENT_BATCH token \u2014 every suggestion is shown in a row with an explicit Approve/Override action, so humanReview is effectively yes and reliedProbabilistic is false. With no write, no deliverable export, and no AI/CDN/persistence, the tier stays Use and all of \u00a75.2\u2013\u00a75.7 hold: restricted data that is only read/formatted/surfaced and reviewed every time stays Lane 1. The policy is explicit that merely touching Client/Fund data is not enough to escalate. This is the clean side of the per-item-review boundary; the same code exporting the scores instead would correctly become Approve."
+    },
+    {
+      "id": "PT-BOUND-02",
+      "title": "Same-origin /api/chat that a backend forwards to a vendor with a server-side key (should be Lane 2)",
+      "attack": "The approved-proxy exception \u2014 a relative /api/chat that looks keyless and same-origin, but is actually a deployed backend forwarding to a non-approved LLM vendor with a server key.",
+      "description": "The front end calls the relative path /api/chat, which matches the approved enterprise-proxy shape (proxyAI, the one Lane-1-permitted AI call). But the repo also ships server/chat_proxy.py: a plain handler that POSTs the prompt to an env-configured upstream LLM endpoint using a server-side API key. The vendor host is hidden behind os.environ (so no vendor-host literal and no SDK import to detect), the handler uses no web framework, and the file path is not under pages/api, app/api, or functions/*.js \u2014 so the engine's BACKEND_PATH safety net misses too. This sits exactly on the boundary the playbook calls out: a same-origin /api/chat backed by the platform's keyless proxy is Lane 1, but the same shape forwarding to a vendor with a server key is effectively a direct AI integration and needs a backend \u2014 Lane 2.",
+      "files": [
+        {
+          "path": "src/chat.js",
+          "snippet": "// Looks like the approved keyless enterprise proxy: relative, same-origin POST.\nexport async function ask(prompt) {\n  const res = await fetch('/api/chat', {\n    method: 'POST',\n    headers: { 'content-type': 'application/json' },\n    body: JSON.stringify({ prompt }),\n  });\n  const { reply } = await res.json();\n  return reply;\n}"
+        },
+        {
+          "path": "server/chat_proxy.py",
+          "snippet": "import os, requests\n\n# Deployed alongside the static front end. /api/chat is NOT the platform proxy:\n# this handler forwards the prompt to our own LLM vendor account using a\n# server-side key. The upstream host is supplied at deploy time via env so it\n# never appears as a literal in source.\nUPSTREAM = os.environ[\"LLM_UPSTREAM_URL\"]\nAPI_KEY = os.environ[\"LLM_API_KEY\"]\n\ndef handle_chat(event):\n    payload = {\"model\": os.environ.get(\"LLM_MODEL\", \"gpt-4o\"),\n               \"messages\": [{\"role\": \"user\", \"content\": event[\"prompt\"]}]}\n    r = requests.post(UPSTREAM, json=payload,\n                      headers={\"Authorization\": f\"Bearer {API_KEY}\"})\n    return {\"reply\": r.json()[\"choices\"][0][\"message\"][\"content\"]}"
+        }
+      ],
+      "expectedLane": "Lane 2",
+      "expectedTier": "Use",
+      "expectedFailingConditions": [
+        "5.5"
+      ],
+      "rationale": "Governance-correct answer is Lane 2: the relative /api/chat is not the approved keyless platform proxy \u2014 it is backed by an app-owned server that forwards to a non-approved LLM vendor with a server-side key. The playbook treats a same-origin /api/chat that the app's own backend forwards to a vendor as effectively direct (fails \u00a75.5) and as needing a backend (\u00a76 backend-needed). It is Use tier on general chat data, not Approve, so the only failing Lane-1 condition is \u00a75.5 (plus the backend/host fact). This targets the proxy-spoof edge: the engine resolves proxyAI=true and, because the forwarder hides the vendor host behind os.environ, uses no framework, and lives at server/chat_proxy.py (outside the BACKEND_PATH allow-shapes), neither directAI nor backend fires \u2014 so it risks calling this Lane 1 when the correct lane is Lane 2."
+    },
+    {
+      "id": "PT-POLY-GO-01",
+      "title": "Go/Gin capital-call service writes to the investor ledger and custodian \u2014 engine sees nothing",
+      "attack": "Write + backend detection is JS/SQL-centric; Go ORM mutations (gorm db.Create/db.Update) and http.NewRequest(\"PUT\",...) and the gin server entrypoint all evade it.",
+      "description": "A two-file Go (Gin + GORM) backend POC. An HTTP handler registers a capital call into the investor ledger database (db.Create / db.Update on investor status) and then PUTs the redemption to the custodian's authoritative position record via http.NewRequest(\"PUT\", ...). It reads/writes investor, fund, and NAV data. There is no raw SQL, no JS ORM method, no fetch/axios, no Dockerfile \u2014 so every write- and backend-detector in the engine stays silent. Verified against the live engine: it returns Lane 1 (light), high confidence, with \u00a75.3 (no writes) and \u00a76 (self-contained front-end) both PASSING.",
+      "expectedLane": "Lane 2 (Approve-state)",
+      "expectedTier": "Approve",
+      "expectedFailingConditions": [
+        "5.3",
+        "6",
+        "5.2",
+        "5.1"
+      ],
+      "expectedDataScope": "restricted",
+      "files": [
+        {
+          "path": "cmd/server/main.go",
+          "snippet": "package main\n\nimport (\n\t\"net/http\"\n\t\"github.com/gin-gonic/gin\"\n\t\"gorm.io/gorm\"\n)\n\n// CapitalCall is a row in the investor ledger (system of record).\ntype CapitalCall struct {\n\tID         uint `gorm:\"primaryKey\"`\n\tInvestorID string\n\tFundID     string\n\tAmount     float64\n\tNAV        float64\n}\n\nfunc registerCapitalCall(db *gorm.DB, c *gin.Context) {\n\tvar call CapitalCall\n\tif err := c.BindJSON(&call); err != nil {\n\t\tc.JSON(400, gin.H{\"error\": err.Error()})\n\t\treturn\n\t}\n\t// Persist the capital call to the ledger and mark the investor's account.\n\tdb.Create(&call)\n\tdb.Model(&Investor{}).Where(\"id = ?\", call.InvestorID).Update(\"status\", \"called\")\n\n\t// Push the redemption to the custodian's authoritative position record.\n\treq, _ := http.NewRequest(\"PUT\", custodianBase+\"/positions/\"+call.InvestorID, payload)\n\thttpClient.Do(req)\n\n\tc.JSON(201, call)\n}\n\nfunc main() {\n\tdb := openLedger()\n\tr := gin.Default()\n\tr.POST(\"/api/capital-calls\", func(c *gin.Context) { registerCapitalCall(db, c) })\n\tr.PATCH(\"/api/investors/:id/redeem\", redeem)\n\tr.Run(\":8080\")\n}\n"
+        },
+        {
+          "path": "internal/ledger/ledger.go",
+          "snippet": "package main\n\nimport (\n\t\"os\"\n\t\"gorm.io/driver/postgres\"\n\t\"gorm.io/gorm\"\n)\n\n// openLedger connects to the production investor-ledger database.\nfunc openLedger() *gorm.DB {\n\tdsn := os.Getenv(\"LEDGER_DSN\")\n\tdb, _ := gorm.Open(postgres.Open(dsn), &gorm.Config{})\n\treturn db\n}\n"
+        }
+      ],
+      "rationale": "Per policy this is Approve-state: it UPDATES a system of record (the investor ledger via gorm db.Create/db.Update, plus an authoritative PUT to the custodian) over investor/fund/NAV data \u2014 the exact 'updates a system of record' Approve trigger. It is also unambiguously Lane 2 on \u00a76 (a real Gin server, not a static file) and \u00a75.3 (writes). The engine instead returns Lane 1 with every \u00a75 passing because its write detectors only know SQL keywords, specific JS ORM methods, and fetch/axios+method, and its backend detectors only know express/flask/fastapi/app.listen/JS paths \u2014 none of which match Go's gorm methods, http.NewRequest, or r.Run/gin. With no Dockerfile to catch via BACKEND_PATH, the whole backend and its writes are invisible. High confidence makes the wrong verdict especially dangerous."
+    },
+    {
+      "id": "PT-POLY-PY-01",
+      "title": "Python `from openai import OpenAI` direct vendor call passes \u00a75.5 as 'no AI calls'",
+      "attack": "\u00a75.5 SDK detection is keyed to JS syntax: quoted 'openai', `new OpenAI(`, or a host literal. Python's bare `from openai import OpenAI` + `OpenAI()` with a base_url from an env var matches none.",
+      "description": "A single-file Python CLI helper that tags public press headlines by sentiment using a DIRECT OpenAI vendor call (from openai import OpenAI; gw = OpenAI(base_url=...); gw.chat.completions.create(...)). It is otherwise a clean Lane-1 candidate: read-only, personal, general/public data, output printed for a human to read, nothing stored, no backend server, no third-party CDN. The only thing that should knock it off Lane 1 is the direct vendor AI call, which Lane 1 forbids (only the same-origin /api/chat proxy is allowed). Verified against the live engine: it returns Lane 1 (light), HIGH confidence, and \u00a75.5 explicitly reads 'Makes no runtime AI model calls.'",
+      "expectedLane": "Lane 2",
+      "expectedTier": "Use",
+      "expectedFailingConditions": [
+        "5.5"
+      ],
+      "expectedConfidence": "high",
+      "expectedDataScope": "general",
+      "files": [
+        {
+          "path": "tag_headlines.py",
+          "snippet": "import os\nfrom openai import OpenAI\n\n# Tiny CLI helper: tag an inbound public press mention by sentiment so the\n# comms team can eyeball the day's coverage. Public news headlines only.\n# Output is printed for a person to read; nothing is stored.\ngw = OpenAI(base_url=os.environ.get(\"OAI_GATEWAY\"))\n\ndef tag(headline: str) -> str:\n    r = gw.chat.completions.create(\n        model=\"gpt-4o-mini\",\n        messages=[\n            {\"role\": \"system\", \"content\": \"Reply with one word: positive, neutral, or negative.\"},\n            {\"role\": \"user\", \"content\": headline},\n        ],\n    )\n    return r.choices[0].message.content.strip()\n\nif __name__ == \"__main__\":\n    while True:\n        h = input(\"headline> \")\n        if not h:\n            break\n        print(h, \"->\", tag(h))\n"
+        }
+      ],
+      "rationale": "Per policy this is Lane 2: it makes a DIRECT external AI model call (the OpenAI SDK to a vendor, not the approved same-origin /api/chat proxy), which fails \u00a75.5 \u2014 the explicit 'no direct external AI call' Lane-1 condition. It is NOT Approve, because it is read-only (no write to a system of record), personal, on general/public data, and every output is shown to a human \u2014 so no Approve trigger applies; tier stays Use. The engine wrongly lands Lane 1 because all three \u00a75.5 detectors are JS-shaped: VENDOR_HOST needs a literal host (here base_url is an env var), the SDK patterns need a quoted 'openai' or `new OpenAI(` (Python uses bare import and OpenAI() with no `new`), and the key detector needs a key literal or VITE_/NEXT_PUBLIC_ prefix (here it reads OAI_GATEWAY). The result is the most dangerous failure mode: a confident, green Lane-1 verdict that hands an ungoverned direct-LLM call to shared hosting."
+    },
+    {
+      "id": "PT-MIX-01",
+      "title": "Investor allocation saver \u2014 README says read-only, code POSTs writes to a relative /save path",
+      "attack": "Same-origin relative POST to a write-y path evades the write detector (MUTATING_FETCH_EXTERNAL needs https://; METHOD_WRITE only catches PUT/PATCH/DELETE), so a real write over fund data is missed.",
+      "description": "A multi-file IR tool whose README insists it is 'read-only, no data written back, no AI.' The GET that loads LP capital-account/NAV figures is genuinely read-only, but the Save button handler does fetch('/api/allocations/save', { method: 'POST', ... }) to record the allocation note back to the allocations service. Because the call is same-origin (relative path) and uses POST, the engine's write detectors all miss it: MUTATING_FETCH_EXTERNAL requires an absolute https:// host, MUTATING_EXTERNAL/XHR_MUTATE_EXTERNAL require an external host, and METHOD_WRITE only fires on PUT/PATCH/DELETE. The engine returns Lane 1 (light) with HIGH confidence and even lists the save-fetch as benign evidence under c55. Verified: making the identical call external (Control 1) or PUT (Control 2) correctly flips it to Approve, proving the relative-POST blind spot.",
+      "files": [
+        {
+          "path": "README.md",
+          "snippet": "# Allocation Note Saver\n\nA lightweight, **read-only** helper for the investor relations team. It pulls each\nLP's capital account and NAV from the portal, formats the allocation note, and lets\nyou eyeball it. **No data is written back** \u2014 it only reads and surfaces. No AI.\nDeterministic formatting only. Safe to host as-is."
+        },
+        {
+          "path": "index.html",
+          "snippet": "<!doctype html>\n<html><head><title>Allocation Notes</title></head>\n<body>\n  <h1>Investor Allocation Notes</h1>\n  <div id=\"grid\"></div>\n  <button id=\"save\">Save note to allocations</button>\n  <script type=\"module\" src=\"./app.js\"></script>\n</body></html>"
+        },
+        {
+          "path": "app.js",
+          "snippet": "// Allocation Note Saver \u2014 formats LP capital account + NAV into a note.\n// Read-only surfacing per the README; the \"save\" simply records the reviewed note.\nimport { formatNote } from './format.js';\n\nasync function loadInvestors() {\n  // GET only \u2014 read the LP capital account + NAV figures\n  const res = await fetch('/api/investors');\n  return res.json();\n}\n\nfunction render(rows) {\n  const grid = document.getElementById('grid');\n  grid.innerHTML = rows.map(r =>\n    '<div>' + r.investor_name + ' \u2014 capital account ' + r.capital_account +\n    ' \u2014 NAV ' + r.fund_nav + '</div>'\n  ).join('');\n}\n\nasync function saveNote(investorId, noteText) {\n  // record the reviewed allocation note back to the allocations service\n  await fetch('/api/allocations/save', {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ investorId, note: noteText, ts: Date.now() })\n  });\n}\n\ndocument.getElementById('save').addEventListener('click', async () => {\n  const rows = await loadInvestors();\n  render(rows);\n  const note = formatNote(rows[0]);\n  await saveNote(rows[0].investor_id, note);\n  alert('Allocation note saved');\n});"
+        },
+        {
+          "path": "format.js",
+          "snippet": "// Deterministic formatting of capital account + NAV figures.\nexport function formatNote(row) {\n  const nav = Number(row.fund_nav).toLocaleString('en-US', { style: 'currency', currency: 'USD' });\n  return 'LP ' + row.investor_name + ' \u2014 capital account ' + row.capital_account + ' \u2014 NAV ' + nav;\n}"
+        }
+      ],
+      "expectedLane": "Lane 2 (Approve-state)",
+      "expectedTier": "Approve",
+      "expectedDataScope": "restricted",
+      "expectedConfidence": "high",
+      "expectedFailingConditions": [
+        "5.3",
+        "5.2"
+      ],
+      "rationale": "The handler POSTs the note back to /api/allocations/save \u2014 a write to a system of record (investor allocations), which \u00a75.3 forbids for Lane 1, and it does so over restricted fund data (capital account, NAV, investor name), so \u00a75.2's read-and-format-only carve-out does not apply. An authoritative write forces tier = Approve (\u00a75.1, the tier always wins). Engine actual: Lane 1 (light), HIGH confidence \u2014 c53 wrongly passes because the write is a same-origin POST to a relative write-y path, which sits in the exact gap between MUTATING_FETCH_EXTERNAL (external-only) and METHOD_WRITE (PUT/PATCH/DELETE-only)."
+    },
+    {
+      "id": "PT-MIX-02",
+      "title": "Meeting-note tidier \u2014 OpenAI SDK + client-side key hidden in a module named summarize.spec.js",
+      "attack": "fileRole() tags any *.spec.js as a test by filename alone, suppressing all RUNTIME_SCOPED AI signals \u2014 so a real, imported-and-invoked direct AI call in a 'spec' (specification) module is treated as non-shipping test code.",
+      "description": "A monorepo whose README and app loudly claim deterministic, no-AI cleanup. lib/clean.js really is deterministic. But app.js also imports summarize() from lib/summarize.spec.js \u2014 named as the summarizer 'specification', not a test \u2014 and calls it on every click. That module imports the OpenAI SDK, instantiates it with import.meta.env.VITE_OPENAI_API_KEY and dangerouslyAllowBrowser: true, and calls chat.completions.create. Because fileRole classifies *.spec.js as test role, every runtime-scoped signal (runtime-ai-vendor-sdk-import, client-side-model-api-key, and even outbound) is marked non-runtime, so firedRuntime is false and directAI never fires. Verified: engine returns Lane 1 (light) with HIGH confidence (c55 passes) \u2014 confidence stays high because index.html/app.js/clean.js are real runtime source, so 'minified/no-source' downgrades don't kick in.",
+      "files": [
+        {
+          "path": "README.md",
+          "snippet": "# Meeting Note Tidier\n\nPaste your raw meeting notes and get a cleaned-up version. **No AI** \u2014 it just\ntrims whitespace, fixes bullet formatting, and de-dupes lines with deterministic\nrules. Nothing leaves your browser. Static page, general data only \u2014 Lane 1."
+        },
+        {
+          "path": "index.html",
+          "snippet": "<!doctype html>\n<html><head><title>Note Tidier</title></head>\n<body>\n  <textarea id=\"in\" placeholder=\"Paste notes\"></textarea>\n  <button id=\"go\">Tidy</button>\n  <pre id=\"out\"></pre>\n  <script type=\"module\" src=\"./app.js\"></script>\n</body></html>"
+        },
+        {
+          "path": "app.js",
+          "snippet": "// Meeting Note Tidier \u2014 deterministic cleanup of pasted notes.\nimport { tidy } from './lib/clean.js';\nimport { summarize } from './lib/summarize.spec.js';\n\ndocument.getElementById('go').addEventListener('click', async () => {\n  const raw = document.getElementById('in').value;\n  const cleaned = tidy(raw);                 // deterministic formatting\n  const tightened = await summarize(cleaned); // condense to a short summary\n  document.getElementById('out').textContent = tightened;\n});"
+        },
+        {
+          "path": "lib/clean.js",
+          "snippet": "// Deterministic note cleanup: trim, fix bullets, de-dupe lines.\nexport function tidy(text) {\n  const lines = text.split('\\n').map(l => l.trim()).filter(Boolean);\n  const seen = new Set();\n  const out = [];\n  for (const l of lines) {\n    const norm = l.replace(/^[-*\u2022]\\s*/, '- ');\n    if (!seen.has(norm)) { seen.add(norm); out.push(norm); }\n  }\n  return out.join('\\n');\n}"
+        },
+        {
+          "path": "lib/summarize.spec.js",
+          "snippet": "// summarize.spec \u2014 the summarizer \"spec\" (behavioural definition) for the tidier.\n// Condenses cleaned notes into a 3-bullet summary via a hosted model.\nimport OpenAI from 'openai';\n\nconst client = new OpenAI({\n  apiKey: import.meta.env.VITE_OPENAI_API_KEY,\n  dangerouslyAllowBrowser: true,\n});\n\nexport async function summarize(text) {\n  const res = await client.chat.completions.create({\n    model: 'gpt-4o-mini',\n    messages: [\n      { role: 'system', content: 'Summarize these meeting notes into 3 bullets.' },\n      { role: 'user', content: text },\n    ],\n  });\n  return res.choices[0].message.content;\n}"
+        }
+      ],
+      "expectedLane": "Lane 2",
+      "expectedTier": "Use",
+      "expectedDataScope": "general",
+      "expectedConfidence": "high",
+      "expectedFailingConditions": [
+        "5.5",
+        "5.4"
+      ],
+      "rationale": "lib/summarize.spec.js is imported by app.js and invoked on every click \u2014 it is shipped runtime code, not a test. It makes a direct external AI call via the OpenAI SDK with a client-side key (dangerouslyAllowBrowser: true), which \u00a75.5 disqualifies from Lane 1, and the summarizing output is probabilistic YELLOW logic under \u00a75.4. Data is general and nothing is shared, so tier stays Use, but any single Lane-1 failure means Lane 2. Engine actual: Lane 1 (light), HIGH confidence \u2014 fileRole() classifies *.spec.js as test role, so the runtime-scoped AI/key/outbound signals are marked non-runtime and directAI never fires; c55 wrongly passes. A .spec.js suffix used as 'specification' rather than 'test' silently demotes the disqualifier."
+    }
+  ],
+  "verifications": [
+    {
+      "id": "PT-EVADE-01",
+      "lane": "Lane 2 (Approve-state)",
+      "tier": "Approve",
+      "failing": [
+        "5.1 tier is Use",
+        "5.3 No writes to a source of truth / production"
+      ],
+      "realistic": true,
+      "reasoning": "The drizzle .update().set().where().returning() is an ORM mutation that persists a new drawn-commitment balance back to the investor capital-account ledger, explicitly the source of record, and syncToFundAdmin mirrors it to the downstream fund-admin system of record \u2014 both are writes to a system of truth over strong investor/capital-account/ledger entity data, which makes the tier Approve and forces Approve-state regardless of being deterministic and AI-free. The case probes verb obfuscation: the PUT is built at runtime via ['P','U','T'].join('') and passed as httpMethod rather than a literal method:, so a naive source scan for PUT/PATCH/DELETE could miss the second write, though the drizzle UPDATE and the write-y /ledger/capital-accounts path should still trip the engine. The dividing line here is clear-cut: it updates a system of record without a human reviewing each change, so this is Approve, not the light path."
+    },
+    {
+      "id": "PT-EVADE-02",
+      "lane": "Lane 2",
+      "tier": "Use",
+      "failing": [
+        "c55",
+        "c56"
+      ],
+      "realistic": true,
+      "reasoning": "The code makes a direct external AI call: it assembles the OpenAI vendor name at runtime ('op'+'enai'), builds https://api.openai.com/v1/chat/completions, dynamically imports the SDK via a variable specifier, and POSTs with a client-side Bearer token (window.__cfg.modelToken) \u2014 that fails Lane-1 \u00a75.5 (and is an outbound non-allowlisted call, \u00a75.6), so it cannot be Lane 1. It does not write to a system of record, and the summary is a draft the analyst reviews and pastes into an email (probabilistic output over investor data is human-reviewed, not an auto-sent client deliverable), so no Approve-state trigger independently holds; correct lane is Lane 2. The evasion targets literal-string detection: because the host string, the SDK import specifier, and the token never appear as recognizable literals, directAI is false in the engine, which would mislabel this Lane 1 if a user (correctly) marks the draft as personal/reviewed \u2014 the engine only reaches a stricter Approve verdict by a coincidental drafting-plus-restricted-data reliance default, while blind to the real direct-AI call."
+    },
+    {
+      "id": "PT-FP-RELY-01",
+      "lane": "Lane 1",
+      "tier": "Use",
+      "failing": [
+        "c51 (tier=Use): engine's false-positive 'deliverable' reliance pushes tier to Approve",
+        "c52 (general data / no Approve trigger): reliance==deliverable trips the Approve-state precedence",
+        "reliance classification: autoReliance becomes 'deliverable' instead of 'personal'"
+      ],
+      "realistic": true,
+      "reasoning": "This is a pure static, client-side tool: deterministic arithmetic over hardcoded sample allocation weights, rendered as an on-screen table, with 'export' being nothing more than a window.print() wrapper. No backend, no AI, no writes, no persistence, no external scripts/calls, no strong/weak entity data terms, and the README confirms general demo data and personal use, so the risk tier is Use and every Lane-1 condition holds \u2014 correct lane is Lane 1. The engine almost certainly mis-escalates to Approve because its STRONG_RELIANCE_EXPORT heuristic matches the function names 'exportToPdf' (matches exportTo+pdf) and 'generateAllocationReport' (matches generate\\w*Report), treating name-shape as evidence of a relied-upon client deliverable even though no document-generation library or file write exists. This is a clean reliance/deliverable false positive on an otherwise textbook Lane-1 utility."
+    },
+    {
+      "id": "PT-FP-SCOPE-02",
+      "lane": "Lane 1",
+      "tier": "Use",
+      "failing": [],
+      "realistic": true,
+      "reasoning": "This is a pure client-side tab UI: no network calls, no AI imports, no writes to any system of record, and it only persists trivial UI preferences (last open tab, light/dark theme) to localStorage \u2014 not sensitive data. The terms \"portfolio\" and \"holdings\" appear only as tab labels in markup/display strings, which are WEAK entity terms that don't count outside a real data context, so the data scope is benign. All Lane-1 conditions hold (risk tier Use, read/format/surface only, no probabilistic output, no direct AI call, no third-party scripts, no sensitive persistence, SSO-fronted), making this correctly Lane 1. The probe targets the engine's data-scope precision: it tempts a false-positive Lane-2/Approve escalation by surfacing financial-sounding words (\"portfolio\", \"holdings\") purely as cosmetic UI labels."
+    },
+    {
+      "id": "PT-BOUND-01",
+      "lane": "Lane 1",
+      "tier": "Use",
+      "failing": [],
+      "realistic": true,
+      "reasoning": "This component runs a tiny local deterministic heuristic (predictRisk) with no network, no model SDK, no third-party scripts, and no persistence \u2014 approved values live only in session useState and nothing is exported or saved to a system of record. Although it produces probabilistic/judgment output over fund/NAV data (strong entity terms), an analyst must explicitly Approve or Override EVERY row before it counts, satisfying the human-review-every-time condition, so merely surfacing a reviewed guess keeps it at Lane 1 / Use rather than Approve-state. The edge it probes is whether the engine treats fund NAV data plus a \"predict\"-style function as automatically Approve-state, when in fact the per-row human gate and lack of any write keep it in Lane 1."
+    },
+    {
+      "id": "PT-BOUND-02",
+      "lane": "Lane 2",
+      "tier": "Register",
+      "failing": [
+        "5.5",
+        "5.6"
+      ],
+      "realistic": true,
+      "reasoning": "The front end POSTs to a relative /api/chat that mimics the approved keyless enterprise proxy, but the included server/chat_proxy.py reveals it is the builder's OWN backend forwarding prompts to their OWN LLM vendor account with a server-side key, hitting an upstream host injected via os.environ[\"LLM_UPSTREAM_URL\"] so no known AI-host literal ever appears in source. That is a custom developer-built backend making a direct, non-approved external AI call (fails \u00a75.5) with an un-allowlisted outbound destination (\u00a75.6) \u2014 squarely Lane 2, not the light path. It is not Approve-state: nothing writes to a system of record, the output isn't a relied-on client deliverable, and the payload carries only a generic prompt with no client/fund entity terms or un-reviewed probabilistic output over client data; tier Register because the proxy is shared/repeatable rather than personal-only."
+    },
+    {
+      "id": "PT-POLY-GO-01",
+      "lane": "Lane 2 (Approve-state)",
+      "tier": "Approve",
+      "failing": [
+        "host",
+        "c51",
+        "c52",
+        "c53"
+      ],
+      "realistic": true,
+      "reasoning": "This Go service writes capital calls into the production investor ledger (db.Create), updates investor status (db.Model().Update), and PUTs to the custodian's authoritative position record \u2014 it UPDATES a system of record over unambiguous client/fund data (investor, capital call, NAV, custodian, redemption, ledger), which is the textbook Approve-state trigger; it is also a custom backend with a live DB integration, so it fails the Lane-1 host condition regardless. The correct lane is Approve-state (Lane 2 + AI Committee sign-off). It targets the engine's language blindness: every write/backend detector in classify.js (BACKEND_STRONG, DB_ORM_WRITE, METHOD_WRITE, MUTATING_EXTERNAL) is tuned for JS/Python and Gin's r.POST/r.PATCH, GORM's db.Create/.Update, Go's http.NewRequest(\"PUT\", ...), and the .go filename all evade them \u2014 so the engine would likely see no backend and no write and wrongly emit Lane 1, a dangerous false-negative."
+    },
+    {
+      "id": "PT-POLY-PY-01",
+      "lane": "Lane 2",
+      "tier": "Use",
+      "failing": [
+        "5.5"
+      ],
+      "realistic": true,
+      "reasoning": "The script only reads public news headlines and prints a probabilistic sentiment tag for a human to eyeball, so tier is Use and the human-in-the-loop and no-write conditions hold. It fails Lane 1 only on 5.5: it imports the openai SDK and calls a configurable env-var gateway (OAI_GATEWAY) directly \u2014 a direct AI SDK call, not the approved same-origin /api/chat proxy (which doesn't even exist for a standalone Python CLI), and the endpoint's true identity is un-inferable from code. Not Approve-state: no system-of-record write, no relied-on client deliverable, and the probabilistic output is reviewed, so it lands in plain Lane 2."
+    },
+    {
+      "id": "PT-MIX-01",
+      "lane": "Lane 2 (Approve-state)",
+      "tier": "Approve",
+      "failing": [
+        "writes to a system of record (POST to /api/allocations/save persists the allocation note back to the allocations service)",
+        "the README's read-only / no-write claim is contradicted by the actual code",
+        "operates over strong fund-entity data (investor_name, capital_account, fund_nav) and updates a record derived from it"
+      ],
+      "realistic": true,
+      "reasoning": "Despite the README insisting the tool is read-only and writes nothing back, app.js clearly performs a write: saveNote() issues a POST to /api/allocations/save with method POST, persisting the reviewed allocation note to the allocations service, and the URL path (/allocations/save) is write-y. That write updates an allocation record over fund/LP data (capital account, NAV), which is a system of record, pushing this beyond Lane 1 (read/format/surface only) into Approve-state, since allocation records others rely on are being updated. The mismatch between the reassuring prose and the code is the adversarial hook \u2014 an engine that over-trusts comments/README claims could wrongly classify this as Lane 1."
+    },
+    {
+      "id": "PT-MIX-02",
+      "lane": "Lane 2",
+      "tier": "Use",
+      "failing": [
+        "No direct external AI call (only the approved same-origin /api/chat proxy is allowed)"
+      ],
+      "realistic": true,
+      "reasoning": "The README and clean.js loudly advertise \"No AI / deterministic,\" but app.js imports summarize from lib/summarize.spec.js, which imports the `openai` SDK and calls api.openai.com directly from the browser (dangerouslyAllowBrowser: true). That is a direct external AI call from the client, not the approved same-origin /api/chat proxy, which fails a required Lane-1 condition and pushes this to Lane 2. The .spec.js naming and \"behavioural definition\" comment are designed to read like a test/spec file rather than runtime code, but app.js actually awaits it on click, so it executes; data scope here is only general meeting notes with no strong entity terms and the output is human-displayed text, so there is no system-of-record write or client deliverable forcing Approve-state."
+    }
+  ]
+}
