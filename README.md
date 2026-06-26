@@ -42,6 +42,22 @@ output? is a write target authoritative? — are auto-defaulted, shown as adjust
 assumptions on the relevant condition rows, and the verdict re-resolves instantly
 when you correct them.
 
+### Precision (deterministic, no AI)
+
+The scanner is hardened against the usual regex pitfalls:
+
+- **Comment- & string-aware** — a commented-out AI call (or `//` inside `https://`)
+  doesn't count.
+- **Import-gated** — an AI SDK only counts when actually imported in source, not
+  merely listed in `package.json`.
+- **Real writes only** — `PUT/PATCH/DELETE`, a `POST` to a write-y external path,
+  and saves to a network share register as system-of-record writes; a `POST` to an
+  AI/GraphQL API does not.
+- **Context-aware data scope** — `restricted` as a CSS class or `client` as an HTTP
+  client are not treated as Client/Fund data.
+- **Calibrated confidence** — the verdict carries high/medium/low, lowered (and shown)
+  when only minified/built code or docs were available.
+
 ## The experience
 
 One warm card that morphs in place — no scrolling, no jargon, built for a
@@ -104,14 +120,14 @@ src/engine/
   index.js              public API
 src/vendor/jszip.min.js vendored locally (no external CDN script)
 test/
-  corpus.json           20-case verification corpus
+  corpus.json           25-case verification corpus (20 governance + 5 accuracy)
   run.mjs               replays the corpus through the engine
 ```
 
 ## Test
 
 ```bash
-node test/run.mjs        # 20/20 on the Lane 1 vs Lane 2 decision
+node test/run.mjs        # 25/25 — Lane decision + 5 accuracy fixtures
 node test/run.mjs -v     # verbose, per-case
 ```
 

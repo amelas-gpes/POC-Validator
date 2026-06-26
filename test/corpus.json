@@ -463,5 +463,99 @@
       "5.7"
     ],
     "rationale": "Tier is APPROVE: it handles Client/Fund (LP allocation) data AND its output is relied on for a client deliverable (the investor capital-call statement) \u2014 per STAR 3.1 either trigger alone is Approve. THE TIER ALWAYS WINS, so even though it is a single static file with no AI and no network calls, it goes to Lane 2 (Approve-state requires a Controlled Workflow Packet + AI Committee). Mapped to Lane-1 conditions it also concretely fails 5.1 (tier not USE), 5.2 (Client/Fund data, not General), and 5.7 (persists sensitive fund/investor data in localStorage). This is the headline edge case: maximal structural simplicity, maximal tier \u2014 Lane 2 regardless."
+  },
+  {
+    "id": "ACC-COMMENT-01",
+    "title": "Commented-out AI call must not flip the lane",
+    "description": "A deterministic currency formatter with an old AI call left in as a comment.",
+    "files": [
+      {
+        "path": "app.js",
+        "snippet": "// const r = await fetch('https://api.anthropic.com/v1/messages',{method:'POST'}); // disabled\nconst fmt = new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'});\ndocument.getElementById('out').textContent = fmt.format(Number(x));"
+      }
+    ],
+    "expectedLane": "Lane 1",
+    "expectedTier": "Use",
+    "expectedFailingConditions": [],
+    "expectedDataScope": "general",
+    "rationale": "The only AI reference is inside a comment; comment-aware scanning means it does not count. Deterministic, general data, no writes -> Lane 1 (light)."
+  },
+  {
+    "id": "ACC-DEP-01",
+    "title": "AI SDK listed in package.json but never imported",
+    "description": "A static app that lists @anthropic-ai/sdk as a dependency but never imports or calls it.",
+    "files": [
+      {
+        "path": "package.json",
+        "snippet": "{\"name\":\"tool\",\"dependencies\":{\"@anthropic-ai/sdk\":\"^0.30.0\"}}"
+      },
+      {
+        "path": "index.html",
+        "snippet": "<h1>Formatter</h1><script src=./app.js></script>"
+      },
+      {
+        "path": "app.js",
+        "snippet": "document.body.textContent = new Date().toISOString();"
+      }
+    ],
+    "expectedLane": "Lane 1",
+    "expectedTier": "Use",
+    "expectedFailingConditions": [],
+    "rationale": "Import-gated AI fact: a bare manifest listing is not a runtime AI call; the SDK is never imported in source -> Lane 1."
+  },
+  {
+    "id": "ACC-WRITE-01",
+    "title": "POST to an external write endpoint is a system-of-record write",
+    "description": "A tool that POSTs records to an external CRM API.",
+    "files": [
+      {
+        "path": "save.js",
+        "snippet": "async function save(rec){ await fetch('https://api.crm.example.com/v2/records',{method:'POST',body:JSON.stringify(rec)}); }"
+      }
+    ],
+    "expectedLane": "Lane 2 (Approve-state)",
+    "expectedTier": "Approve",
+    "expectedFailingConditions": [
+      "5.3"
+    ],
+    "rationale": "POST to an external /records endpoint is a write to a system of record (5.3), which sets Approve. Distinct from an AI/GraphQL POST, which is not a write."
+  },
+  {
+    "id": "ACC-SCOPE-01",
+    "title": "CSS '.restricted' and HTTP client are not client data",
+    "description": "A general tool whose stylesheet has a .restricted class and whose code uses an HTTP client.",
+    "files": [
+      {
+        "path": "styles.css",
+        "snippet": ".restricted-banner{display:none}.confidential{color:#900}"
+      },
+      {
+        "path": "app.js",
+        "snippet": "const client = new HttpClient(); // api client\nclient.get('/public/rates').then(render);"
+      }
+    ],
+    "expectedLane": "Lane 1",
+    "expectedTier": "Use",
+    "expectedFailingConditions": [],
+    "expectedDataScope": "general",
+    "rationale": "Context-aware data-scope: 'restricted'/'confidential' as CSS classes and 'client' as an HTTP client are benign and must not flag client/fund data."
+  },
+  {
+    "id": "ACC-MINIFIED-01",
+    "title": "Minified-only bundle lowers confidence",
+    "description": "A repo where the only analyzable file is a minified build that calls api.openai.com.",
+    "files": [
+      {
+        "path": "bundle.min.js",
+        "snippet": "!function(e){var t=fetch;t('https://api.openai.com/v1/chat/completions',{method:'POST',headers:{a:1},body:JSON.stringify(e)})}();var x0=function(a,b){return a+b+0};var x1=function(a,b){return a+b+1};var x2=function(a,b){return a+b+2};var x3=function(a,b){return a+b+3};var x4=function(a,b){return a+b+4};var x5=function(a,b){return a+b+5};var x6=function(a,b){return a+b+6};var x7=function(a,b){return a+b+7};var x8=function(a,b){return a+b+8};var x9=function(a,b){return a+b+9};var x10=function(a,b){return a+b+10};var x11=function(a,b){return a+b+11};var x12=function(a,b){return a+b+12};var x13=function(a,b){return a+b+13};var x14=function(a,b){return a+b+14};var x15=function(a,b){return a+b+15};var x16=function(a,b){return a+b+16};var x17=function(a,b){return a+b+17};var x18=function(a,b){return a+b+18};var x19=function(a,b){return a+b+19};var x20=function(a,b){return a+b+20};var x21=function(a,b){return a+b+21};var x22=function(a,b){return a+b+22};var x23=function(a,b){return a+b+23};var x24=function(a,b){return a+b+24};var x25=function(a,b){return a+b+25};var x26=function(a,b){return a+b+26};var x27=function(a,b){return a+b+27};var x28=function(a,b){return a+b+28};var x29=function(a,b){return a+b+29};var x30=function(a,b){return a+b+30};var x31=function(a,b){return a+b+31};var x32=function(a,b){return a+b+32};var x33=function(a,b){return a+b+33};var x34=function(a,b){return a+b+34};var x35=function(a,b){return a+b+35};var x36=function(a,b){return a+b+36};var x37=function(a,b){return a+b+37};var x38=function(a,b){return a+b+38};var x39=function(a,b){return a+b+39};var x40=function(a,b){return a+b+40};var x41=function(a,b){return a+b+41};var x42=function(a,b){return a+b+42};var x43=function(a,b){return a+b+43};var x44=function(a,b){return a+b+44};var x45=function(a,b){return a+b+45};var x46=function(a,b){return a+b+46};var x47=function(a,b){return a+b+47};var x48=function(a,b){return a+b+48};var x49=function(a,b){return a+b+49};var x50=function(a,b){return a+b+50};var x51=function(a,b){return a+b+51};var x52=function(a,b){return a+b+52};var x53=function(a,b){return a+b+53};var x54=function(a,b){return a+b+54};var x55=function(a,b){return a+b+55};var x56=function(a,b){return a+b+56};var x57=function(a,b){return a+b+57};var x58=function(a,b){return a+b+58};var x59=function(a,b){return a+b+59};"
+      }
+    ],
+    "expectedLane": "Lane 2",
+    "expectedTier": "Use",
+    "expectedFailingConditions": [
+      "5.5"
+    ],
+    "expectedConfidence": "low",
+    "rationale": "Calibrated confidence: only minified/built code was readable, so the verdict is reported low-confidence even though a direct AI call is visible."
   }
 ]

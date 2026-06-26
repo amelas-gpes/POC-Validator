@@ -259,9 +259,13 @@ function renderResult() {
        </button>` : '';
 
   const cert = r.certainty || { proven: 0, assumed: 0 };
+  const conf = r.confidence || { level: 'high', reasons: [] };
+  const confChip = conf.level !== 'high'
+    ? `<span class="t-sep">·</span><span class="t-conf t-conf-${conf.level}" title="${esc(conf.reasons.join(' '))}">${conf.level} confidence</span>` : '';
   const trust = `<button class="trust" id="trust-line" aria-label="See the full check">
       <span class="t-proven">${ICONS.check} ${cert.proven} read from your code</span>
       ${cert.assumed ? `<span class="t-sep">·</span><span class="t-assumed">${cert.assumed} assumed</span>` : ''}
+      ${confChip}
       <span class="t-sep">·</span><span class="t-link">see the full check</span>
     </button>`;
 
@@ -482,9 +486,11 @@ function renderDrawer() {
 
   const v = VERDICT[OUTCOME[r.verdict.key]];
   const cert = r.certainty || { proven: 0, assumed: 0 };
+  const conf = r.confidence || { level: 'high', reasons: [] };
   const certBlock = `<div class="cert-block">
       <span class="cert-proven">${ICONS.check} ${cert.proven} read straight from your code</span>
-      ${cert.assumed ? `<span class="cert-assumed">${ICONS.eye || ''}${cert.assumed} we had to assume — confirm below</span>` : '<span class="cert-assumed">nothing left to assume</span>'}
+      ${cert.assumed ? `<span class="cert-assumed">${cert.assumed} we had to assume — confirm below</span>` : '<span class="cert-assumed">nothing left to assume</span>'}
+      ${conf.level !== 'high' ? `<span class="cert-conf cert-conf-${conf.level}">${conf.level} confidence — ${esc(conf.reasons[0] || '')}</span>` : ''}
     </div>`;
   const lighten = (r.lighten || []);
   const lightenBlock = lighten.length ? `

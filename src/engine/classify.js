@@ -11,11 +11,43 @@
 // signals (a direct AI call, a third-party script, a server runtime) decide
 // on their own.
 
-import { scanCorpus } from './scan.js';
+import { scanCorpus, stripComments, fileRole } from './scan.js';
 
 // Re-derived, tightened detectors for the dimensions that need calibration so
 // a weak keyword can't over-escalate a benign utility.
-const STRONG_RESTRICTED = /\b(investors?|LPs?|GPs?|capital\s*accounts?|capital\s*calls?|NAV|AUM|subscriptions?|redemptions?|custodian|ledger|holdings?|mandates?|fund\s*(nav|id|name|position|holdings?)|client[_\s-]?(name|id|account|holding|portfolio)|SSN|EIN|TIN|account\s*number|routing\s*number|PII|PHI|MNPI|material\s*non[-\s]public|restricted|confidential)\b/i;
+// Strong entity terms fire on their own; weak terms ("restricted" as a CSS
+// class, "portfolio" on a marketing page) need a real data context.
+const STRONG_ENTITY = /\b(investors?|LPs?|GPs?|capital\s*accounts?|capital\s*calls?|NAV|AUM|subscriptions?|redemptions?|custodian|ledger|mandates?|fund\s*(nav|id|name|position|holdings?)|client[_\s-]?(name|id|account|holding|portfolio)|SSN|EIN|TIN|account\s*number|routing\s*number|PII|PHI|MNPI|material\s*non[-\s]public)\b/i;
+const WEAK_SCOPE = /\b(restricted|confidential|portfolios?|holdings?)\b/i;
+const SCOPE_BENIGN = /[.#][\w-]*(restricted|confidential)|class\s*=\s*['"][^'"]*(restricted|confidential)|(restricted|confidential)[\w-]*\s*[:{]/i;
+// A POST to an external API is only a *write* when its path looks like one —
+// POST is also how AI / GraphQL / search APIs are queried, so method alone
+// can't decide. PUT/PATCH/DELETE are unambiguous writes (handled by METHOD_WRITE).
+const MUTATING_FETCH_EXTERNAL =/(fetch|axios)\s*\(\s*['"`]https?:\/\/(?!([a-z0-9.-]*\.)?gpfundsolutions\.com)[^'"`]*\/(records?|create|update|save|insert|write|entries|ledger|payments?|sign[-_]?off|submit|upload|transactions?|invoices?)\b[^'"`]*['"`]\s*,[^;]{0,300}?\bmethod\b\s*:\s*['"`]post/i;
+const XHR_MUTATE_EXTERNAL = /\.open\s*\(\s*['"`](put|patch|delete)['"`]\s*,\s*['"`]https?:\/\/(?!([a-z0-9.-]*\.)?gpfundsolutions\.com)/i;
+const SHARED_PATH_WRITE = /(\.save|writefile\w*|to_csv|write_csv|wb\.save|savefig|\.to_excel)\s*\(\s*['"`](\\\\|\/\/)[a-z0-9._-]+[\\/]/i;
+
+// Restricted-data detection: a strong entity anywhere, or a weak term in a
+// non-CSS / non-markup line. Operates on comment-stripped text.
+function detectRestricted(cleanFiles) {
+  if (cleanFiles.some((f) => STRONG_ENTITY.test(f.clean))) return true;
+  for (const f of cleanFiles) {
+    const e = (f.path.split('.').pop() || '').toLowerCase();
+    if (['css', 'scss', 'sass', 'less'].includes(e)) continue; // stylesheet "restricted" is never data
+    for (const ln of f.clean.split('\n')) {
+      if (WEAK_SCOPE.test(ln) && !SCOPE_BENIGN.test(ln)) return true;
+    }
+  }
+  return false;
+}
+
+// Heuristic: is this file a minified/built bundle (so we can't really read it)?
+function isMinified(text) {
+  if (!text) return false;
+  const lines = text.split('\n');
+  const maxLine = lines.reduce((m, l) => Math.max(m, l.length), 0);
+  return maxLine > 1500 || (text.length > 2000 && text.length / lines.length > 400);
+}
 const VENDOR_HOST = /(api\.(anthropic|openai|cohere|mistral|groq)\.|[a-z0-9-]+\.openai\.azure\.com|openai\.azure\.com|generativelanguage\.googleapis\.com|api-inference\.huggingface\.co|api\.replicate\.com|bedrock(-runtime)?\.[a-z0-9-]+\.amazonaws\.com)/i;
 const STRONG_RELIANCE_EXPORT = /(jspdf|pdfkit|exceljs|xlsx\.write|pptxgenjs|\bdocx\b|exportto(excel|pdf|csv)|generate\w*(report|statement|deliverable|pack|filing|invoice))/i;
 // Sharing/reliance is mostly un-inferable from code; only fire on unambiguous
@@ -114,7 +146,9 @@ export function analyze(corpus, assumptions = {}) {
   const scan = scanCorpus(corpus);
   const S = scan.signals;
   const files = (corpus && corpus.files) || [];
-  const grep = (re) => files.some((f) => re.test(f.text || ''));
+  // Comment-stripped copies so grep-based facts also ignore commented-out code.
+  const cleanFiles = files.map((f) => ({ path: f.path, clean: stripComments(f.path, f.text || '') }));
+  const grep = (re) => cleanFiles.some((f) => re.test(f.clean));
   const fired = (id) => !!(S[id] && S[id].firedRuntime);
   const entry = (id) => S[id];
   const evOf = (...ids) => {
@@ -137,17 +171,23 @@ export function analyze(corpus, assumptions = {}) {
 
   // ---- Code-certain technical facts ---------------------------------------
   const directHost = anyEvidenceMatches(entry('runtime-ai-direct-vendor-host'), VENDOR_HOST);
-  const sdkImport = fired('runtime-ai-vendor-sdk-import');
+  // An AI SDK counts as a runtime call only when actually imported in source —
+  // a bare listing in package.json (even outside devDependencies) doesn't.
+  const sdkEntry = entry('runtime-ai-vendor-sdk-import');
+  const sdkImport = !!(sdkEntry && sdkEntry.runtimeEvidence.some((e) => e.role !== 'manifest'));
   const clientKey = fired('client-side-model-api-key');
   const directAI = directHost || sdkImport || clientKey;
   const proxyAI = entry('approved-enterprise-proxy') && entry('approved-enterprise-proxy').fired && !directAI;
   const localML = fired('logic-probabilistic-ml-inference');
   const backendEv = entry('backend-server-present')?.evidence || [];
   const backend = backendEv.some((e) => BACKEND_STRONG.test(e.text)) || backendEv.some((e) => BACKEND_PATH.test(e.path));
-  // A write to a system of record needs DB/ORM/SQL or BaaS evidence, or a
-  // mutating call to an external host — NOT a POST to the same-origin proxy.
+  // A write to a system of record: DB/ORM/SQL or BaaS evidence, a mutating call
+  // to an external host (PUT/PATCH/DELETE or POST to an external API), or a save
+  // to a network share — NOT a POST to the same-origin /api/chat proxy.
   const dbOrmWrite = (entry('db-source-of-truth-write')?.evidence || []).some((e) => DB_ORM_WRITE.test(e.text));
-  const dbWrite = dbOrmWrite || fired('backend-as-a-service-write') || grep(MUTATING_EXTERNAL) || grep(METHOD_WRITE);
+  const dbWrite = dbOrmWrite || fired('backend-as-a-service-write')
+    || grep(MUTATING_EXTERNAL) || grep(METHOD_WRITE)
+    || grep(MUTATING_FETCH_EXTERNAL) || grep(XHR_MUTATE_EXTERNAL) || grep(SHARED_PATH_WRITE);
   const cdnScript = fired('third-party-cdn-script') || fired('third-party-analytics-telemetry');
   const outbound = fired('outbound-network-call-nonallowlisted');
   const persistence = fired('client-persistence-sensitive');
@@ -165,7 +205,7 @@ export function analyze(corpus, assumptions = {}) {
   const silentBatch = probabilistic && grep(SILENT_BATCH);
 
   // ---- Dimensions code cannot prove -> auto-defaults, user-overridable -----
-  const restrictedStrong = anyEvidenceMatches(entry('data-scope-restricted-keywords'), STRONG_RESTRICTED);
+  const restrictedStrong = detectRestricted(cleanFiles);
   const relianceExport = anyEvidenceMatches(entry('reliance-deliverable-markers'), STRONG_RELIANCE_EXPORT);
   const relianceShare = anyEvidenceMatches(entry('reliance-shared-repeatable-register'), STRONG_RELIANCE_SHARE);
 
@@ -380,6 +420,28 @@ export function analyze(corpus, assumptions = {}) {
   const assumed = conditions.filter((cc) => cc.assumption && !used.overridden[cc.assumption.kind]);
   const certainty = { proven: conditions.length - assumed.length, assumed: assumed.length, assumedIds: assumed.map((cc) => cc.id) };
 
+  // ---- Confidence: how well could the engine actually see the code? --------
+  const runtimeFiles = files.filter((f) => fileRole(f.path) === 'runtime');
+  const minifiedRuntime = runtimeFiles.filter((f) => isMinified(f.text || ''));
+  const sawSource = runtimeFiles.some((f) => !isMinified(f.text || ''));
+  const confReasons = [];
+  let confLevel = 'high';
+  if (runtimeFiles.length && !sawSource) {
+    confLevel = 'low';
+    confReasons.push('Only minified/built code was available — not the original source, so some calls may be hidden.');
+  } else if (!runtimeFiles.length) {
+    confLevel = 'low';
+    confReasons.push('No source files were read — this is based on docs and config only.');
+  } else if (minifiedRuntime.length) {
+    confLevel = 'medium';
+    confReasons.push('Some files are minified, so a few signals could be hidden.');
+  }
+  if (confLevel !== 'low' && files.length <= 1 && verdictKey !== 'lane1') {
+    confLevel = confLevel === 'high' ? 'medium' : confLevel;
+    confReasons.push('Based on a single small snippet — drop in the whole project for a firmer read.');
+  }
+  const confidence = { level: confLevel, reasons: confReasons };
+
   return {
     verdict: VERDICTS[verdictKey],
     tier,
@@ -390,6 +452,7 @@ export function analyze(corpus, assumptions = {}) {
     unknowns,
     lighten,
     certainty,
+    confidence,
     buildTool,
     meta: {
       label: (corpus && corpus.label) || 'POC',

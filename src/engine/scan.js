@@ -48,6 +48,53 @@ function fileRole(path) {
   return 'runtime';
 }
 
+function extOf(path) {
+  const base = path.split('/').pop().toLowerCase();
+  const dot = base.lastIndexOf('.');
+  return dot >= 0 ? base.slice(dot + 1) : '';
+}
+
+// Which comment styles apply to a file, so we can blank comments before matching.
+function commentStyle(path) {
+  const e = extOf(path);
+  if (['css', 'sass'].includes(e)) return { line: [], block: [['/*', '*/']] };
+  if (['scss', 'less'].includes(e)) return { line: ['//'], block: [['/*', '*/']] };
+  if (['html', 'htm', 'vue', 'svelte', 'xml', 'md', 'markdown'].includes(e)) return { line: [], block: [['<!--', '-->']] };
+  if (['py', 'rb', 'sh', 'bash', 'yml', 'yaml', 'toml', 'ini', 'conf', 'cfg', 'env', 'r', 'tf', 'tfvars', 'properties'].includes(e)) return { line: ['#'], block: [] };
+  if (['sql', 'graphql', 'gql'].includes(e)) return { line: ['--'], block: [['/*', '*/']] };
+  return { line: ['//'], block: [['/*', '*/']] }; // js/ts/jsx/tsx/java/go/rs/c/cs/php/…
+}
+
+// Return a copy of `text` with comments replaced by spaces (newlines preserved,
+// so offsets and line numbers stay identical). String literals are respected so
+// `//` inside "https://…" is never mistaken for a comment.
+export function stripComments(path, text) {
+  const { line, block } = commentStyle(path);
+  const out = text.split('');
+  const n = text.length;
+  const blank = (a, b) => { for (let k = a; k < b && k < n; k++) if (out[k] !== '\n') out[k] = ' '; };
+  let i = 0, str = null;
+  while (i < n) {
+    const ch = text[i];
+    if (str) { if (ch === '\\') { i += 2; continue; } if (ch === str) str = null; i++; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { str = ch; i++; continue; }
+    let hit = false;
+    for (const [op, cl] of block) {
+      if (text.startsWith(op, i)) { const e = text.indexOf(cl, i + op.length); const stop = e < 0 ? n : e + cl.length; blank(i, stop); i = stop; hit = true; break; }
+    }
+    if (hit) continue;
+    for (const tok of line) {
+      if (text.startsWith(tok, i)) {
+        if (tok === '//' && text[i - 1] === ':') break; // protect URLs like https://
+        const nl = text.indexOf('\n', i); const stop = nl < 0 ? n : nl; blank(i, stop); i = stop; hit = true; break;
+      }
+    }
+    if (hit) continue;
+    i++;
+  }
+  return out.join('');
+}
+
 // Precompute line-start offsets so a match index -> 1-based line number is O(log n).
 function lineIndexer(text) {
   const starts = [0];
@@ -98,16 +145,19 @@ function isRuntimeManifestMatch(path, text, idx) {
  */
 export function scanCorpus(corpus) {
   const files = (corpus && corpus.files) || [];
+  // Precompute per-file once: role, original text (for display), comment-stripped
+  // text (for matching), and a line indexer.
+  const prepared = files.map((file) => {
+    const text = file.text || '';
+    return { path: file.path, role: fileRole(file.path), text, stripped: stripComments(file.path, text), toLine: lineIndexer(text) };
+  });
   const results = {};
 
   for (const { signal, regexes } of COMPILED) {
     const evidence = [];
-    for (const file of files) {
+    for (const f of prepared) {
       if (evidence.length >= MAX_EVIDENCE_PER_SIGNAL) break;
-      const path = file.path;
-      const role = fileRole(path);
-      const text = file.text || '';
-      const toLine = lineIndexer(text);
+      const { path, role, text, stripped, toLine } = f;
 
       for (let ri = 0; ri < regexes.length; ri++) {
         const re = regexes[ri];
@@ -120,7 +170,8 @@ export function scanCorpus(corpus) {
           evidence.push({ path, line: 0, text: path, role, runtime: role !== 'doc' && role !== 'test', via: 'path', patternIndex: ri });
         }
         re.lastIndex = 0;
-        while ((m = re.exec(text)) !== null && perPattern < MAX_MATCHES_PER_PATTERN_PER_FILE) {
+        // Match against comment-stripped text so matches inside comments don't count.
+        while ((m = re.exec(stripped)) !== null && perPattern < MAX_MATCHES_PER_PATTERN_PER_FILE) {
           const idx = m.index;
           const runtimeOk = role === 'manifest' ? isRuntimeManifestMatch(path, text, idx) : (role !== 'doc' && role !== 'test');
           evidence.push({

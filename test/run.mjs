@@ -39,9 +39,13 @@ for (const tc of corpus) {
   const result = analyze(toCorpus(tc));
   const gotLane = result.verdict.lane;
   const wantLane = tc.expectedLane;
-  const binOk = binary(gotLane) === binary(wantLane); // primary: Lane 1 vs Lane 2
+  let binOk = binary(gotLane) === binary(wantLane); // primary: Lane 1 vs Lane 2
   const exactOk = gotLane === wantLane;               // secondary: incl. Approve-state
   const tierOk = result.tier === tc.expectedTier;     // secondary: un-inferable
+  // Optional precision checks for the accuracy fixtures.
+  const scopeOk = !tc.expectedDataScope || result.assumptions.dataScope === tc.expectedDataScope;
+  const confOk = !tc.expectedConfidence || result.confidence.level === tc.expectedConfidence;
+  if (!scopeOk || !confOk) binOk = false; // these are hard assertions on the fixture
   if (binOk) binPass++; else binFail++;
   if (exactOk) exactPass++;
   if (tierOk) tierPass++;
@@ -54,6 +58,8 @@ for (const tc of corpus) {
     console.log(`    lane: ${laneCol}${gotLane}${RESET}${exactOk ? '' : `  want ${wantLane}`}   tier: ${tierMark}   posture: ${result.posture}   looks-like: ${result.pattern}`);
     const drivers = result.conditions.filter((c) => c.driving).map((c) => `${c.ref} ${c.title}`);
     console.log(`    ${DIM}drivers: ${drivers.join(' · ') || '(all pass)'}   expected-fail: ${(tc.expectedFailingConditions || []).join(', ') || '(none)'}${RESET}`);
+    if (tc.expectedDataScope && !scopeOk) console.log(`    ${RED}data scope: ${result.assumptions.dataScope} (want ${tc.expectedDataScope})${RESET}`);
+    if (tc.expectedConfidence && !confOk) console.log(`    ${RED}confidence: ${result.confidence.level} (want ${tc.expectedConfidence})${RESET}`);
   }
 }
 
